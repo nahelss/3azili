@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "3azili",
+    "slug": "3azili",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/icon.png",
+      "backgroundColor": "#043C83",
+      "resizeMode": "contain"
+    },
+    "ios": {
+      "bundleIdentifier": "com.3azili.app",
+      "supportsTablet": false
+    },
+    "android": {
+      "package": "com.threeazili.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#043C83"
+      }
+    },
+    "web": {
+      "favicon": "./assets/icon.png"
+    }
+  }
+}

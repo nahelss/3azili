@@ -1,0 +1,291 @@
+// 3azili — Prisma schema
+// Mirrors the data model in cleaning-app-spec.md. Postgres assumed.
+// Run: npx prisma migrate dev --name init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CLIENT
+  CLEANER
+  BOTH
+  ADMIN
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum ServiceType {
+  INDOOR
+  OUTDOOR
+  BOTH
+}
+
+enum PricingType {
+  HOURLY
+  DAILY
+}
+
+enum BookingMode {
+  INSTANT_BOOK
+  REQUEST_ACCEPT
+}
+
+enum BookingStatus {
+  REQUESTED
+  ACCEPTED
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  DISPUTED
+  CANCELLED
+  NO_SHOW
+}
+
+enum PaymentMethod {
+  CASH
+  WHISH
+  OMT
+  BOB
+}
+
+enum PaymentType {
+  DEPOSIT
+  FULL_PAYMENT
+  PAYOUT
+  SUPPLY_PAYOUT
+}
+
+enum PaymentStatus {
+  PENDING
+  CLEARED
+  REFUNDED
+  FORFEITED
+}
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+}
+
+enum DocType {
+  NATIONAL_ID
+  WORK_PERMIT
+  RESIDENCY_PERMIT
+}
+
+model User {
+  id              String    @id @default(uuid())
+  fullName        String
+  phone           String    @unique
+  email           String?
+  role            Role
+  languages       String[]  // e.g. ["Arabic", "English"]
+  gender          Gender?
+  profilePhotoUrl String?
+  currentLocation String    // city / village name — see note in spec: not GPS
+  idVerified      Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+
+  clientProfile   ClientProfile?
+  cleanerProfile  CleanerProfile?
+  legalDocuments  LegalDocument[]
+  auditLogs       AuditLog[] @relation("AdminActor")
+}
+
+model ClientProfile {
+  id                String   @id @default(uuid())
+  userId            String   @unique
+  user              User     @relation(fields: [userId], references: [id])
+  savedLocations    String[]
+  preferredPayment  PaymentMethod?
+  ratingAvg         Float    @default(0)
+  ratingCount       Int      @default(0)
+
+  bookings          Booking[] @relation("ClientBookings")
+}
+
+model Region {
+  id    String @id @default(uuid())
+  name  String @unique
+  cities City[]
+}
+
+model City {
+  id       String  @id @default(uuid())
+  name     String
+  regionId String
+  region   Region  @relation(fields: [regionId], references: [id])
+  coveringCleaners CleanerProfile[] @relation("CleanerCoverage")
+  bookings Booking[]
+
+  @@unique([regionId, name])
+}
+
+model CleanerProfile {
+  id                  String        @id @default(uuid())
+  userId              String        @unique
+  user                User          @relation(fields: [userId], references: [id])
+  hourlyRate          Float
+  dailyRate           Float
+  serviceType         ServiceType
+  skills              String[]      // deep clean, post-construction, move-out, ironing, etc.
+  coverageCities      City[]        @relation("CleanerCoverage") // cities/villages this cleaner covers, across one or more regions
+  minBookingHours     Int           @default(2)
+  bringsSupplies      Boolean       @default(false)
+  anonymous           Boolean       @default(false)
+  isAvailableNow      Boolean       @default(false)
+  ratingAvg           Float         @default(0)
+  ratingCount         Int           @default(0)
+  legalStatus         String?       // provisional field — see spec §5, pending legal review
+  backgroundCheckStatus String      @default("pending") // pending / self_declared / verified
+
+  bookings            Booking[]     @relation("CleanerBookings")
+  availabilitySlots   AvailabilitySlot[]
+}
+
+model AvailabilitySlot {
+  id               String         @id @default(uuid())
+  cleanerProfileId String
+  cleanerProfile   CleanerProfile @relation(fields: [cleanerProfileId], references: [id])
+  start            DateTime
+  end              DateTime
+  recurring        Boolean        @default(false)
+}
+
+model SupplyCatalogItem {
+  id                 String   @id @default(uuid())
+  name               String
+  cleanerPayoutPrice Float
+  category           String?
+  active             Boolean  @default(true)
+
+  bookingItems       BookingSupplyItem[]
+}
+
+model Booking {
+  id                    String        @id @default(uuid())
+  clientId              String
+  client                ClientProfile @relation("ClientBookings", fields: [clientId], references: [id])
+  cleanerId             String
+  cleaner               CleanerProfile @relation("CleanerBookings", fields: [cleanerId], references: [id])
+
+  pricingType           PricingType
+  scheduledStart        DateTime
+  scheduledEnd          DateTime
+  cityId                String
+  city                  City          @relation(fields: [cityId], references: [id])
+  pinLat                Float?        // optional exact-location pin the client dropped
+  pinLng                Float?
+  serviceType           ServiceType
+  bookingMode           BookingMode
+
+  basePrice             Float
+  laborCommission       Float         // 20% of basePrice, platform-configurable
+  suppliesClientTotal   Float         @default(0)
+  suppliesCleanerPayout Float         @default(0)
+  suppliesCommission    Float         @default(0) // 7% of supplies, platform-configurable
+  totalPrice            Float
+
+  paymentMethod         PaymentMethod
+  depositRequired        Boolean      @default(false) // true when paymentMethod = CASH
+  status                BookingStatus @default(REQUESTED)
+  cancellationReason    String?
+  penaltyApplied        Boolean       @default(false)
+
+  supplyItems           BookingSupplyItem[]
+  payments              Payment[]
+  reviews               Review[]
+  dispute               Dispute?
+  beforePhotos          String[]
+  afterPhotos           String[]
+
+  createdAt             DateTime      @default(now())
+}
+
+model BookingSupplyItem {
+  id         String            @id @default(uuid())
+  bookingId  String
+  booking    Booking           @relation(fields: [bookingId], references: [id])
+  itemId     String
+  item       SupplyCatalogItem @relation(fields: [itemId], references: [id])
+  quantity   Int               @default(1)
+}
+
+model Payment {
+  id        String        @id @default(uuid())
+  bookingId String
+  booking   Booking       @relation(fields: [bookingId], references: [id])
+  payerId   String?
+  payeeId   String?
+  amount    Float
+  method    PaymentMethod
+  type      PaymentType
+  status    PaymentStatus @default(PENDING)
+  createdAt DateTime      @default(now())
+}
+
+model Review {
+  id        String   @id @default(uuid())
+  bookingId String
+  booking   Booking  @relation(fields: [bookingId], references: [id])
+  raterId   String
+  rateeId   String
+  stars     Int
+  comment   String?
+  createdAt DateTime @default(now())
+}
+
+model Dispute {
+  id          String        @id @default(uuid())
+  bookingId   String        @unique
+  booking     Booking       @relation(fields: [bookingId], references: [id])
+  raisedBy    String        // user id
+  reason      String
+  evidenceUrls String[]
+  status      DisputeStatus @default(OPEN)
+  resolution  String?
+  resolvedBy  String?
+  createdAt   DateTime      @default(now())
+}
+
+model LegalDocument {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  docType    DocType
+  fileUrl    String
+  verified   Boolean  @default(false)
+  verifiedBy String?
+  verifiedAt DateTime?
+}
+
+model PlatformConfig {
+  id                    String  @id @default("singleton")
+  commissionRateLabor   Float   @default(20)
+  commissionRateSupplies Float  @default(7)
+  suppliesPrepayRequired Boolean @default(true)
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  adminId      String
+  admin        User     @relation("AdminActor", fields: [adminId], references: [id])
+  targetType   String   // user / cleaner_profile / client_profile / booking / supply_item
+  targetId     String
+  fieldChanged String
+  oldValue     String?
+  newValue     String?
+  reason       String?
+  timestamp    DateTime @default(now())
+}
