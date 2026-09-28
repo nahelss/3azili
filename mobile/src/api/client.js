@@ -20,6 +20,31 @@ export async function verifyOtp({ phone, token }) {
   return data;
 }
 
+// Called once, right after a brand-new phone verifies for the first time.
+// Creates the shared `users` row plus whichever profile row(s) the chosen
+// role needs. `role` is 'client' | 'cleaner' | 'both'.
+export async function completeSignup({ userId, phone, fullName, role }) {
+  const { error: userErr } = await supabase.from('users').insert({
+    id: userId,
+    phone,
+    full_name: fullName,
+    role,
+  });
+  if (userErr) throw userErr;
+
+  if (role === 'client' || role === 'both') {
+    const { error } = await supabase.from('client_profiles').insert({ user_id: userId });
+    if (error) throw error;
+  }
+  if (role === 'cleaner' || role === 'both') {
+    const { error } = await supabase.from('cleaner_profiles').insert({ user_id: userId });
+    if (error) throw error;
+  }
+  const { data, error } = await supabase.from('users').select('*').eq('id', userId).single();
+  if (error) throw error;
+  return data;
+}
+
 async function getRegions() {
   const { data, error } = await supabase
     .from('regions')
@@ -178,6 +203,7 @@ async function getBooking(id) {
 export const api = {
   requestOtp,
   verifyOtp,
+  completeSignup,
   getRegions,
   searchCleaners,
   getCleaner,

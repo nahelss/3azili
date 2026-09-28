@@ -1,18 +1,18 @@
 import { useEffect, useState } from 'react';
 import { View, Text, ScrollView, Pressable, StyleSheet, ActivityIndicator, Alert } from 'react-native';
 import { api } from '../src/api/client';
+import { useAuth } from '../src/AuthContext';
 
 // Cleaner-facing coverage picker: mirrors the web prototype's "Cleaner app"
 // tab. A cleaner can cover one or more regions, and within each region
-// choose specific cities/villages. Selections are saved via the backend's
-// PATCH /cleaners/:id/coverage endpoint (replaces the full coverage set).
+// choose specific cities/villages. Selections are saved via
+// cleaner_coverage_cities (replace-all semantics — see updateCoverage in
+// src/api/client.js).
 //
 // TODO beyond coverage: rate editing, availability toggle, incoming request
-// accept/decline list — wire these to a PATCH /cleaners/:id route and a
-// GET /bookings?cleanerId= endpoint once auth is in place.
-const DEMO_CLEANER_ID = 'demo-cleaner-id'; // replace once auth is wired up
-
+// accept/decline list, and the busy/free calendar from the web prototype.
 export default function CleanerHomeScreen() {
+  const { user, profile } = useAuth();
   const [regions, setRegions] = useState([]);
   const [selectedCityIds, setSelectedCityIds] = useState(new Set());
   const [loading, setLoading] = useState(true);
@@ -38,7 +38,7 @@ export default function CleanerHomeScreen() {
   async function save() {
     setSaving(true);
     try {
-      await api.updateCoverage(DEMO_CLEANER_ID, Array.from(selectedCityIds));
+      await api.updateCoverage(user.id, Array.from(selectedCityIds));
       Alert.alert('Saved', 'Your coverage area has been updated.');
     } catch (e) {
       Alert.alert('Something went wrong', e.message);
@@ -51,7 +51,7 @@ export default function CleanerHomeScreen() {
 
   return (
     <ScrollView style={styles.container}>
-      <Text style={styles.title}>Coverage area</Text>
+      <Text style={styles.title}>{profile?.full_name ? `Hi, ${profile.full_name}` : 'Coverage area'}</Text>
       <Text style={styles.sub}>Choose the regions and cities/villages you're willing to work in.</Text>
 
       {regions.map((region) => (
@@ -79,8 +79,9 @@ export default function CleanerHomeScreen() {
       </Pressable>
 
       <Text style={styles.todo}>
-        TODO: rate editing, availability toggle, incoming request list — wire these to a
-        PATCH /cleaners/:id route and a GET /bookings?cleanerId= endpoint once auth is in place.
+        TODO: rate editing, availability toggle, incoming request accept/decline list, and the
+        busy/free calendar — query cleaner_profiles / bookings / cleaner_calendar_blocks directly,
+        same pattern as everything else in src/api/client.js.
       </Text>
     </ScrollView>
   );

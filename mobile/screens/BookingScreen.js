@@ -1,33 +1,36 @@
 import { useState } from 'react';
 import { View, Text, TextInput, Pressable, StyleSheet, Alert } from 'react-native';
 import { api } from '../src/api/client';
+import { useAuth } from '../src/AuthContext';
 
-// NOTE: this recomputes price client-side for display only. The backend is
-// the source of truth (see backend/src/routes/bookings.js) — always trust
-// its response over this local calculation before charging anyone.
-const LABOR_RATE = 0.2; // keep in sync with PlatformConfig, or better: fetch it
+// NOTE: this recomputes price client-side for display only. createBooking
+// (src/api/client.js) is the source of truth for what actually gets saved —
+// its number should always be trusted over this local one, and it in turn
+// should eventually move to a Supabase Edge Function before real charging.
+const LABOR_RATE = 0.2; // keep in sync with platform_config.commission_rate_labor, or better: fetch it
 
 export default function BookingScreen({ route }) {
+  const { user } = useAuth();
   const { cleaner, cityId } = route.params;
-  const [pricingType, setPricingType] = useState('HOURLY');
+  const [pricingType, setPricingType] = useState('hourly');
   const [duration, setDuration] = useState(String(cleaner.minBookingHours || 2));
-  const [paymentMethod, setPaymentMethod] = useState('CASH');
+  const [paymentMethod, setPaymentMethod] = useState('cash');
 
   const dur = Number(duration) || 0;
-  const base = pricingType === 'HOURLY' ? cleaner.hourlyRate * dur : cleaner.dailyRate * dur;
+  const base = pricingType === 'hourly' ? cleaner.hourlyRate * dur : cleaner.dailyRate * dur;
   const commission = base * LABOR_RATE;
   const total = base + commission;
 
   async function confirm() {
     try {
       await api.createBooking({
-        clientId: 'demo-client-id', // replace once auth is wired up
+        clientId: user.id,
         cleanerId: cleaner.id,
         pricingType,
         duration: dur,
         cityId,
         serviceType: cleaner.serviceType,
-        bookingMode: 'REQUEST_ACCEPT',
+        bookingMode: 'request_accept',
         scheduledStart: new Date().toISOString(),
         scheduledEnd: new Date(Date.now() + dur * 3600 * 1000).toISOString(),
         paymentMethod,
@@ -41,7 +44,7 @@ export default function BookingScreen({ route }) {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.label}>Duration ({pricingType === 'HOURLY' ? 'hours' : 'days'})</Text>
+      <Text style={styles.label}>Duration ({pricingType === 'hourly' ? 'hours' : 'days'})</Text>
       <TextInput style={styles.input} value={duration} onChangeText={setDuration} keyboardType="numeric" />
 
       <Text style={styles.line}>Labor: ${base.toFixed(2)}</Text>
