@@ -9,13 +9,14 @@
 import { supabase } from '../supabaseClient';
 import { kmBetween } from '../googleMaps';
 
-// Codes are delivered over WhatsApp rather than SMS — set the "SMS
-// Provider" in Supabase (Authentication > Providers > Phone) to Twilio and
-// turn on its WhatsApp channel; see the WhatsApp OTP setup notes for the
-// exact steps. `type: 'sms'` on verify below is just Supabase's internal
-// label for "phone OTP" — it's correct regardless of which channel sent it.
+// Codes are delivered over plain SMS — set the "SMS Provider" in Supabase
+// (Authentication > Providers > Phone) to Twilio with a Twilio phone number
+// (not the WhatsApp sandbox number). `channel: 'sms'` is the default, but
+// it's set explicitly here so it's obvious this is SMS, not WhatsApp.
+// `type: 'sms'` on verify below is just Supabase's internal label for
+// "phone OTP" — unrelated to which channel actually sent the code.
 export async function requestOtp(phone) {
-  const { error } = await supabase.auth.signInWithOtp({ phone, options: { channel: 'whatsapp' } });
+  const { error } = await supabase.auth.signInWithOtp({ phone, options: { channel: 'sms' } });
   if (error) throw error;
   return { ok: true };
 }
@@ -26,9 +27,31 @@ export async function verifyOtp({ phone, token }) {
   return data;
 }
 
+// --- Email + password sign-in (testing-phase default) -----------------
+// Used in place of phone/SMS OTP for now, to avoid Twilio costs while
+// testing. Switching back to phone+SMS as the primary sign-in later is
+// just a UI change — this doesn't touch the phone/OTP functions above,
+// which stay intact and ready. `signUp` may or may not return a session
+// depending on the Supabase project's "Confirm email" setting
+// (Authentication > Providers > Email): if it's ON, no session comes back
+// until the person clicks the confirmation link Supabase emails them; if
+// it's OFF (simplest for testing), the session comes back immediately and
+// they're signed in right away.
+export async function signUpWithPassword(email, password) {
+  const { data, error } = await supabase.auth.signUp({ email, password });
+  if (error) throw error;
+  return data; // { user, session } — session is null if email confirmation is required
+}
+
+export async function signInWithPassword(email, password) {
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  return data;
+}
+
 // Email as an account-recovery path: once an email is attached and
 // confirmed (see attachEmail), the same account can sign in with an email
-// code instead of WhatsApp — for someone who's lost access to their phone
+// code instead of SMS — for someone who's lost access to their phone
 // number. Supabase matches by email to the existing auth user, so this
 // signs into the SAME account rather than creating a new one, as long as
 // the email was actually confirmed when it was attached.
@@ -61,10 +84,11 @@ export async function attachEmail(email) {
 // Called once, right after a brand-new phone verifies for the first time.
 // Creates the shared `users` row plus whichever profile row(s) the chosen
 // role needs. `role` is 'client' | 'cleaner' | 'both'.
-export async function completeSignup({ userId, phone, fullName, role, address, addressLat, addressLng }) {
+export async function completeSignup({ userId, phone, email, fullName, role, address, addressLat, addressLng }) {
   const { error: userErr } = await supabase.from('users').insert({
     id: userId,
-    phone,
+    phone: phone ?? null,
+    email: email ?? null,
     full_name: fullName,
     role,
     full_address: address ?? null,
@@ -491,6 +515,8 @@ async function setUserSuspended(userId, suspended, reason) {
 export const api = {
   requestOtp,
   verifyOtp,
+  signUpWithPassword,
+  signInWithPassword,
   requestEmailOtp,
   verifyEmailOtp,
   attachEmail,
