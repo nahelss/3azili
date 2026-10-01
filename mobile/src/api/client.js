@@ -7,9 +7,15 @@
 // client on purpose, so SearchScreen/CleanerProfileScreen/BookingScreen/
 // CleanerHomeScreen didn't need to change at all.
 import { supabase } from '../supabaseClient';
+import { kmBetween } from '../googleMaps';
 
+// Codes are delivered over WhatsApp rather than SMS — set the "SMS
+// Provider" in Supabase (Authentication > Providers > Phone) to Twilio and
+// turn on its WhatsApp channel; see the WhatsApp OTP setup notes for the
+// exact steps. `type: 'sms'` on verify below is just Supabase's internal
+// label for "phone OTP" — it's correct regardless of which channel sent it.
 export async function requestOtp(phone) {
-  const { error } = await supabase.auth.signInWithOtp({ phone });
+  const { error } = await supabase.auth.signInWithOtp({ phone, options: { channel: 'whatsapp' } });
   if (error) throw error;
   return { ok: true };
 }
@@ -20,15 +26,50 @@ export async function verifyOtp({ phone, token }) {
   return data;
 }
 
+// Email as an account-recovery path: once an email is attached and
+// confirmed (see attachEmail), the same account can sign in with an email
+// code instead of WhatsApp — for someone who's lost access to their phone
+// number. Supabase matches by email to the existing auth user, so this
+// signs into the SAME account rather than creating a new one, as long as
+// the email was actually confirmed when it was attached.
+export async function requestEmailOtp(email) {
+  const { error } = await supabase.auth.signInWithOtp({ email });
+  if (error) throw error;
+  return { ok: true };
+}
+
+export async function verifyEmailOtp({ email, token }) {
+  const { data, error } = await supabase.auth.verifyOtp({ email, token, type: 'email' });
+  if (error) throw error;
+  return data;
+}
+
+// Attaches/updates the email on the currently signed-in auth account.
+// Supabase emails a confirmation link to the new address — the email only
+// becomes usable for sign-in/recovery once that's clicked. Also mirrors it
+// onto the public.users row immediately, for display/contact purposes.
+export async function attachEmail(email) {
+  const { error: authErr } = await supabase.auth.updateUser({ email });
+  if (authErr) throw authErr;
+  const { data: userData } = await supabase.auth.getUser();
+  if (userData?.user?.id) {
+    await supabase.from('users').update({ email }).eq('id', userData.user.id);
+  }
+  return { ok: true };
+}
+
 // Called once, right after a brand-new phone verifies for the first time.
 // Creates the shared `users` row plus whichever profile row(s) the chosen
 // role needs. `role` is 'client' | 'cleaner' | 'both'.
-export async function completeSignup({ userId, phone, fullName, role }) {
+export async function completeSignup({ userId, phone, fullName, role, address, addressLat, addressLng }) {
   const { error: userErr } = await supabase.from('users').insert({
     id: userId,
     phone,
     full_name: fullName,
     role,
+    full_address: address ?? null,
+    address_lat: addressLat ?? null,
+    address_lng: addressLng ?? null,
   });
   if (userErr) throw userErr;
 
@@ -77,6 +118,59 @@ async function searchCleaners({ city } = {}) {
     ratingAvg: c.cleaner_rating_avg,
     ratingCount: c.cleaner_rating_count,
   }));
+}
+
+// Saves the geocoded address from AuthScreen's sign-up step (or a later
+// "update my address" screen) onto the shared users row.
+async function updateMyAddress({ userId, address, lat, lng }) {
+  const { error } = await supabase
+    .from('users')
+    .update({ full_address: address, address_lat: lat, address_lng: lng })
+    .eq('id', userId);
+  if (error) throw error;
+  return { ok: true };
+}
+
+// Proximity search: geocode an address client-side (see googleMaps.js),
+// then filter cleaners whose own address is within radiusKm — same
+// haversine approach as the web prototype. There's no PostGIS index here
+// yet, so this pulls candidate cleaners (optionally narrowed by city) and
+// filters in JS; fine at MVP scale, worth moving server-side once the
+// cleaner list gets big.
+async function searchCleanersNearby({ lat, lng, radiusKm = 10, city } = {}) {
+  let query = supabase
+    .from('cleaner_profiles')
+    .select(
+      `user_id, hourly_rate, daily_rate, service_type, cleaner_rating_avg, cleaner_rating_count, anonymous_toggle,
+       users!inner(full_name, languages_spoken, address_lat, address_lng)`
+    );
+  if (city) {
+    query = supabase
+      .from('cleaner_profiles')
+      .select(
+        `user_id, hourly_rate, daily_rate, service_type, cleaner_rating_avg, cleaner_rating_count, anonymous_toggle,
+         users!inner(full_name, languages_spoken, address_lat, address_lng),
+         cleaner_coverage_cities!inner(city_id, cities!inner(name))`
+      )
+      .eq('cleaner_coverage_cities.cities.name', city);
+  }
+  const { data, error } = await query;
+  if (error) throw error;
+
+  return data
+    .filter((c) => c.users.address_lat != null && c.users.address_lng != null)
+    .map((c) => ({
+      id: c.user_id,
+      displayName: c.anonymous_toggle ? `Anonymous #${c.user_id.slice(0, 4)}` : c.users.full_name,
+      languages: c.users.languages_spoken || [],
+      hourlyRate: c.hourly_rate,
+      dailyRate: c.daily_rate,
+      ratingAvg: c.cleaner_rating_avg,
+      ratingCount: c.cleaner_rating_count,
+      distanceKm: kmBetween({ lat, lng }, { lat: c.users.address_lat, lng: c.users.address_lng }),
+    }))
+    .filter((c) => c.distanceKm <= radiusKm)
+    .sort((a, b) => a.distanceKm - b.distanceKm);
 }
 
 async function getCleaner(id) {
@@ -200,14 +294,233 @@ async function getBooking(id) {
   return data;
 }
 
+// The name/number clients are told to send Whish transfers to — set by an
+// admin from AdminScreen's Settings section (admin_set_platform_config).
+async function getWhishReceiveInfo() {
+  const { data, error } = await supabase
+    .from('platform_config')
+    .select('whish_receive_name, whish_receive_number')
+    .single();
+  if (error) throw error;
+  return { name: data.whish_receive_name, number: data.whish_receive_number };
+}
+
+// Records the client's claim that they sent a Whish transfer, with whatever
+// reference/confirmation text they were given. This does NOT verify the
+// money actually arrived — there's no Whish merchant API for that yet (see
+// chat) — it just puts the payment in 'pending' for an admin to check
+// against the real Whish account and clear with admin_mark_payment_cleared.
+async function submitWhishPayment({ bookingId, payerId, amount, reference }) {
+  const { data, error } = await supabase
+    .from('payments')
+    .insert({
+      booking_id: bookingId,
+      payer_id: payerId,
+      amount,
+      method: 'whish',
+      type: 'full_payment',
+      status: 'pending',
+      payer_reference: reference || null,
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// ---- Admin (all gated server-side by is_admin() — see the migrations) ----
+
+async function checkIsAdmin() {
+  const { data, error } = await supabase.rpc('is_admin');
+  if (error) return false;
+  return !!data;
+}
+
+async function getAdminStats() {
+  const { data, error } = await supabase.rpc('admin_get_stats');
+  if (error) throw error;
+  return data;
+}
+
+async function getPlatformConfig() {
+  const { data, error } = await supabase.from('platform_config').select('*').single();
+  if (error) throw error;
+  return data;
+}
+
+async function setPlatformConfig({ laborRate, suppliesRate, prepay, whishName, whishNumber }) {
+  const { data, error } = await supabase.rpc('admin_set_platform_config', {
+    p_labor_rate: laborRate ?? null,
+    p_supplies_rate: suppliesRate ?? null,
+    p_prepay: prepay ?? null,
+    p_whish_name: whishName ?? null,
+    p_whish_number: whishNumber ?? null,
+  });
+  if (error) throw error;
+  return data;
+}
+
+// Regions/cities with their recommended-rate rows joined in, for the admin
+// "Regions & rates" section.
+async function getRegionsWithRates() {
+  const [{ data: regions, error: regionsErr }, { data: rates, error: ratesErr }] = await Promise.all([
+    supabase.from('regions').select('id, name, cities(id, name)').order('name'),
+    supabase.from('region_rate_config').select('region_id, recommended_hourly_rate'),
+  ]);
+  if (regionsErr) throw regionsErr;
+  if (ratesErr) throw ratesErr;
+  const rateByRegion = Object.fromEntries((rates ?? []).map((r) => [r.region_id, r.recommended_hourly_rate]));
+  return regions.map((r) => ({
+    ...r,
+    cities: [...r.cities].sort((a, b) => a.name.localeCompare(b.name)),
+    recommendedHourlyRate: rateByRegion[r.id] ?? null,
+  }));
+}
+
+async function addRegion(name) {
+  const { data, error } = await supabase.rpc('admin_add_region', { p_name: name });
+  if (error) throw error;
+  return data;
+}
+
+async function removeRegion(regionId) {
+  const { error } = await supabase.rpc('admin_remove_region', { p_region_id: regionId });
+  if (error) throw error;
+  return { ok: true };
+}
+
+async function addCity(regionId, name) {
+  const { data, error } = await supabase.rpc('admin_add_city', { p_region_id: regionId, p_name: name });
+  if (error) throw error;
+  return data;
+}
+
+async function removeCity(cityId) {
+  const { error } = await supabase.rpc('admin_remove_city', { p_city_id: cityId });
+  if (error) throw error;
+  return { ok: true };
+}
+
+async function bulkImportCities(regionId, names, sourceFileName) {
+  const { data, error } = await supabase.rpc('admin_bulk_import_cities', {
+    p_region_id: regionId,
+    p_names: names,
+    p_source_file: sourceFileName ?? null,
+  });
+  if (error) throw error;
+  return data;
+}
+
+async function setRecommendedRate(regionId, rate) {
+  const { data, error } = await supabase.rpc('admin_set_recommended_rate', { p_region_id: regionId, p_rate: rate });
+  if (error) throw error;
+  return data;
+}
+
+async function listPendingPayments() {
+  const { data, error } = await supabase
+    .from('payments')
+    .select('*, bookings(id, client_id, cleaner_id, total_price)')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return data;
+}
+
+async function markPaymentCleared(paymentId, note) {
+  const { data, error } = await supabase.rpc('admin_mark_payment_cleared', {
+    p_payment_id: paymentId,
+    p_note: note ?? null,
+  });
+  if (error) throw error;
+  return data;
+}
+
+async function listDisputes() {
+  const { data, error } = await supabase
+    .from('disputes')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return data;
+}
+
+// Direct table write, not an RPC — "disputes update by admin" RLS already
+// permits it, and resolving a dispute doesn't carry the same
+// financial-audit weight as the money-moving admin_* functions.
+async function resolveDispute(disputeId, resolution) {
+  const { data, error } = await supabase
+    .from('disputes')
+    .update({ status: 'resolved', resolution, resolved_by: (await supabase.auth.getUser()).data.user?.id })
+    .eq('id', disputeId)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+async function listAuditLog(limit = 100) {
+  const { data, error } = await supabase
+    .from('audit_log')
+    .select('*')
+    .order('timestamp', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data;
+}
+
+async function listUsers() {
+  const { data, error } = await supabase
+    .from('users')
+    .select('id, full_name, phone, email, role, is_suspended, id_verified, created_at')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return data;
+}
+
+async function setUserSuspended(userId, suspended, reason) {
+  const { data, error } = await supabase.rpc('admin_set_user_suspended', {
+    p_user_id: userId,
+    p_suspended: suspended,
+    p_reason: reason ?? null,
+  });
+  if (error) throw error;
+  return data;
+}
+
 export const api = {
   requestOtp,
   verifyOtp,
+  requestEmailOtp,
+  verifyEmailOtp,
+  attachEmail,
   completeSignup,
   getRegions,
   searchCleaners,
+  searchCleanersNearby,
+  updateMyAddress,
   getCleaner,
   updateCoverage,
   createBooking,
   getBooking,
+  getWhishReceiveInfo,
+  submitWhishPayment,
+  checkIsAdmin,
+  getAdminStats,
+  getPlatformConfig,
+  setPlatformConfig,
+  getRegionsWithRates,
+  addRegion,
+  removeRegion,
+  addCity,
+  removeCity,
+  bulkImportCities,
+  setRecommendedRate,
+  listPendingPayments,
+  markPaymentCleared,
+  listDisputes,
+  resolveDispute,
+  listAuditLog,
+  listUsers,
+  setUserSuspended,
 };
